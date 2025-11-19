@@ -1,0 +1,1180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>弱水 · AquaFlow｜HPO NER 标注台</title>
+  <meta name="description" content="输入临床文本 → AquaFlow NER + DualLoRAEnc → 高亮表型片段并映射 HPO 术语。" />
+  <style>
+    :root{
+      --bg1:#eaf4ff; --bg2:#ffffff; --bg3:#bcd9ff;
+      --ink:#0b1550; --muted:#4a5a8a; --primary:#2a73ff; --accent:#75c5ff; --accent2:#7af3ff;
+      --glass:rgba(255,255,255,0.80); --glass-strong:rgba(255,255,255,0.92);
+      --shadow:0 20px 50px rgba(22,72,155,.15);
+      --radius:18px;
+      --input-bg:#f8fbff; --input-border:#dbe7ff; --input-ink:#102050;
+    }
+
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{
+      margin:0;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+      color:var(--ink);
+      overflow-x:hidden;
+      background:#e5edff;
+    }
+
+    /* 背景：弱水渐变 + 光晕 + 点阵 */
+    .bg-anim{
+      position:fixed; inset:0; z-index:-3;
+      background:linear-gradient(120deg,var(--bg1),var(--bg2),var(--bg3));
+      background-size:300% 300%;
+      animation:grad 22s ease-in-out infinite;
+    }
+    @keyframes grad{
+      0%{background-position:0% 50%}
+      50%{background-position:100% 50%}
+      100%{background-position:0% 50%}
+    }
+    .glow{
+      position:fixed; inset:0; z-index:-2; pointer-events:none; filter:blur(72px);
+    }
+    .glow::before,.glow::after{
+      content:""; position:absolute; border-radius:50%; width:40vw; height:40vw; opacity:.35;
+      background:radial-gradient(closest-side,var(--accent),transparent 70%);
+      animation:drift 28s ease-in-out infinite;
+    }
+    .glow::before{left:-12vw; top:-8vw}
+    .glow::after{right:-14vw; bottom:-12vw; animation-delay:-8s}
+    @keyframes drift{
+      0%,100%{transform:translate(0,0)}
+      50%{transform:translate(6vw,4vw)}
+    }
+    canvas#dots{position:fixed; inset:0; z-index:-1; pointer-events:none; opacity:.65}
+
+    /* 导航 & 品牌 */
+    .nav{
+      max-width:1120px; margin:0 auto; padding:16px 20px;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    .brand{display:flex; align-items:center; gap:10px; font-weight:700}
+    .logo{
+      width:36px; height:36px; display:grid; place-items:center;
+      border-radius:12px;
+      background:linear-gradient(135deg,var(--primary),var(--accent));
+      color:#fff; box-shadow:var(--shadow); font-size:20px;
+    }
+    .nav a{
+      color:var(--muted); text-decoration:none; margin-left:16px; font-size:14px;
+    }
+    .nav a:hover{text-decoration:underline}
+
+    /* 侧边竖旗 */
+    .vertical-flag{
+      position:fixed; left:14px; top:50%;
+      transform:translateY(-50%);
+      writing-mode:vertical-rl; text-orientation:upright;
+      letter-spacing:2px; font-weight:800; font-size:18px; line-height:1.1;
+      color:#fff;
+      background:linear-gradient(180deg,var(--primary),var(--accent));
+      border-radius:14px;
+      padding:16px 10px;
+      box-shadow:0 12px 30px rgba(42,115,255,.35);
+      backdrop-filter:blur(6px);
+      user-select:none; z-index:10;
+    }
+
+    /* Hero */
+    .hero{
+      max-width:1120px;
+      margin:28px auto 6px;
+      padding:0 20px;
+      text-align:center;
+    }
+    .tag{
+      display:inline-flex; align-items:center; gap:6px;
+      padding:4px 10px;
+      border-radius:999px;
+      background:var(--glass);
+      backdrop-filter:blur(10px);
+      font-size:12px; color:var(--muted);
+      box-shadow:var(--shadow);
+    }
+    .tag-dot{
+      width:7px; height:7px; border-radius:50%;
+      background:linear-gradient(135deg,var(--primary),var(--accent));
+    }
+    .headline{font-size:34px; margin:12px 0 6px}
+    .headline b{
+      background:linear-gradient(90deg,var(--primary),var(--accent2));
+      -webkit-background-clip:text; background-clip:text; color:transparent;
+    }
+    .hero p{
+      font-size:15px; color:#2b3e77; margin:6px 0 4px;
+    }
+    .hero-sub{font-size:12px; color:#6b7fab;}
+
+    /* 主布局 */
+    .wrap{max-width:1120px; margin:0 auto; padding:0 20px 28px}
+    .panel{
+      display:grid; grid-template-columns:1.05fr 1.15fr;
+      gap:18px; margin:22px 0 0;
+    }
+    @media (max-width: 980px){
+      .panel{grid-template-columns:1fr}
+      .vertical-flag{display:none}
+    }
+
+    .card{
+      background:var(--glass-strong);
+      border-radius:var(--radius);
+      padding:16px;
+      box-shadow:var(--shadow);
+      position:relative;
+      overflow:hidden;
+    }
+    .card::before{
+      content:""; position:absolute; inset:-40%;
+      background:radial-gradient(circle at 0 0,rgba(188,217,255,.7),transparent 50%);
+      opacity:.45; pointer-events:none;
+    }
+    .card-inner{position:relative; z-index:1}
+    .card h3{margin:4px 0 8px; font-size:16px}
+    .subtitle{font-size:13px; color:#4a5a8a; margin:0 0 10px}
+
+    /* 输入控件 */
+    .field{display:flex; flex-direction:column; gap:6px; margin-bottom:12px}
+    .field label{font-size:13px; color:#274082; font-weight:600}
+    .textarea, .input{
+      width:100%;
+      border:1.5px solid var(--input-border);
+      border-radius:12px;
+      background:var(--input-bg);
+      color:var(--input-ink);
+      padding:11px 12px;
+      outline:none;
+      transition:.15s;
+      font-size:14px;
+      resize:vertical;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.7);
+    }
+    .textarea{min-height:120px; max-height:260px}
+    .textarea:focus, .input:focus{
+      border-color:#9cc4ff;
+      box-shadow:0 0 0 4px rgba(42,115,255,.12);
+    }
+    .textarea::placeholder{color:#9ca9d0}
+    .hint{font-size:12px; color:#5b6ea3}
+
+    .actions{
+      display:flex; justify-content:space-between; align-items:center;
+      margin-top:10px; gap:10px;
+    }
+    .link-ghost{
+      border:none; background:none; padding:0;
+      color:var(--primary); font-size:12px; cursor:pointer;
+      text-decoration:underline; text-decoration-style:dotted;
+    }
+
+    /* 按钮 */
+    .button {
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding:11px 22px;
+      border:0;
+      position:relative;
+      overflow:hidden;
+      border-radius:999px;
+      transition:all 0.12s ease-out;
+      font-weight:600;
+      cursor:pointer;
+      color:rgb(37,37,37);
+      z-index:0;
+      box-shadow:0 0px 7px -5px rgba(0,0,0,0.5);
+      background:#f1f5f9;
+      font-size:13px;
+    }
+    .button[disabled]{opacity:.55; cursor:wait}
+    .button:hover {background:#dbeafe; color:#0b1550;}
+    .button:active {transform:scale(0.97);}
+    .hoverEffect {
+      position:absolute; inset:0;
+      display:flex; align-items:center; justify-content:center;
+      z-index:-1;
+    }
+    .hoverEffect div{
+      background:linear-gradient(90deg,var(--primary),var(--accent),var(--accent2));
+      border-radius:40rem; width:9rem; height:9rem;
+      transition:0.4s; filter:blur(18px); opacity:0.6;
+      animation:effect infinite 3s linear;
+    }
+    .button:hover .hoverEffect div{width:7.5rem;height:7.5rem;}
+    @keyframes effect{
+      0%{transform:rotate(0deg);}
+      100%{transform:rotate(360deg);}
+    }
+
+    /* 高亮文本区域 */
+    .meta-bar{
+      display:flex; justify-content:space-between; align-items:center;
+      font-size:11px; color:#6b7fab; margin-bottom:6px;
+    }
+    .output-shell{
+      border-radius:14px;
+      border:1px solid #dbeafe;
+      background:linear-gradient(135deg,#f5f7ff,#f1f5ff);
+      padding:9px 10px;
+      max-height:250px;
+      overflow:auto;
+      font-size:14px;
+      line-height:1.7;
+      color:#1e293b;
+    }
+    .output-shell::-webkit-scrollbar{width:6px}
+    .output-shell::-webkit-scrollbar-thumb{
+      background:linear-gradient(180deg,#bfdbfe,#93c5fd);
+      border-radius:999px;
+    }
+    .output-placeholder{
+      font-size:13px; color:#6b7fab;
+    }
+
+    /* NER span 样式 */
+    .ner-span{
+      position:relative; display:inline-block;
+      margin:0 1px 1px 0; padding:0 2px;
+      border-radius:4px;
+      background:linear-gradient(120deg,#e0edff,#dbeafe);
+      border-bottom:2px solid rgba(37,99,235,.7);
+      cursor:pointer;
+      transition:box-shadow .12s ease-out, transform .12s ease-out, background .12s ease-out, border-color .12s ease-out;
+    }
+    .ner-span::after{
+      content:attr(data-hpo-id);
+      margin-left:3px;
+      font-size:9px;
+      font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      letter-spacing:.06em;
+      text-transform:uppercase;
+      color:#64748b;
+      opacity:.85;
+    }
+    .ner-span:hover{
+      background:linear-gradient(120deg,#dbeafe,#e0f2fe);
+      border-color:#2563eb;
+      box-shadow:0 0 0 1px rgba(129,140,248,.6),0 0 0 6px rgba(191,219,254,.7);
+      transform:translateY(-1px);
+    }
+    .ner-span[data-selected="true"]{
+      background:linear-gradient(120deg,#c7d2fe,#e0f2fe);
+      border-color:#1d4ed8;
+      box-shadow:0 0 0 1px rgba(59,130,246,.7),0 0 0 7px rgba(191,219,254,.9);
+    }
+
+    /* HPO 列表 */
+    .hpo-shell{
+      border-radius:14px;
+      border:1px solid #dbeafe;
+      background:linear-gradient(135deg,#f8fbff,#edf2ff);
+      padding:8px 9px 6px;
+      margin-top:10px;
+    }
+    .hpo-header{
+      display:flex; justify-content:space-between; align-items:center;
+      font-size:11px; color:#6b7fab; margin-bottom:4px;
+    }
+    .hpo-count{
+      padding:1px 8px; border-radius:999px;
+      background:#e0edff; color:#0f172a;
+      font-size:11px; font-variant-numeric:tabular-nums;
+    }
+    .hpo-scroll{
+      max-height:210px; overflow:auto; padding-right:2px;
+    }
+    .hpo-scroll::-webkit-scrollbar{width:6px}
+    .hpo-scroll::-webkit-scrollbar-thumb{
+      background:linear-gradient(180deg,#bfdbfe,#93c5fd);
+      border-radius:999px;
+    }
+    .hpo-item{
+      border-radius:11px;
+      padding:6px 7px 6px;
+      margin-bottom:5px;
+      background:#f8fafc;
+      border:1px solid #e5e7eb;
+      cursor:pointer;
+      transition:border-color .12s ease-out, box-shadow .12s ease-out, transform .12s ease-out, background .12s ease-out;
+      font-size:12px;
+    }
+    .hpo-item:hover{
+      background:#eff6ff;
+      border-color:#93c5fd;
+      box-shadow:0 6px 16px rgba(148,163,184,.25);
+      transform:translateY(-1px);
+    }
+    .hpo-id{
+      font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,"Liberation Mono","Courier New",monospace;
+      font-size:11px; color:#1e293b; letter-spacing:.06em; text-transform:uppercase;
+    }
+    .hpo-name{
+      font-weight:600; color:#0f172a; margin-top:2px;
+    }
+    .hpo-score{
+      font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,"Liberation Mono","Courier New",monospace;
+      font-size:11px; color:#1d4ed8; margin-left:4px;
+    }
+    .hpo-syn{
+      font-size:11px; color:#6b7280; margin-top:2px;
+    }
+    .hpo-empty{
+      font-size:12px; color:#94a3b8; padding:4px 0;
+    }
+
+    /* 新增：Top-5 preview 在卡片中展示 */
+    .hpo-topk-preview{
+      margin-top:5px;
+      padding-top:4px;
+      border-top:1px dashed #e5e7eb;
+    }
+    .hpo-topk-preview-title{
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:#9ca3af;
+      margin-bottom:2px;
+    }
+    .hpo-topk-preview-list{
+      list-style:none;
+      margin:0;
+      padding:0;
+      font-size:11px;
+    }
+    .hpo-topk-preview-list li{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:4px;
+    }
+    .hpo-topk-rank{
+      font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+      color:#9ca3af;
+      flex:0 0 auto;
+      min-width:1.2em;
+    }
+    .hpo-topk-name{
+      flex:1 1 auto;
+      color:#111827;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .hpo-topk-score{
+      flex:0 0 auto;
+      font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+      color:#1d4ed8;
+      margin-left:4px;
+    }
+
+    .footer-note{
+      font-size:11px; color:#6b7fab; margin-top:8px; text-align:right;
+    }
+
+    /* Tooltip */
+    .ner-tooltip{
+      position:fixed; z-index:60;
+      min-width:210px; max-width:320px;
+      padding:8px 10px;
+      border-radius:14px;
+      background:rgba(255,255,255,.96);
+      backdrop-filter:blur(12px);
+      border:1px solid rgba(148,163,184,.5);
+      box-shadow:0 18px 42px rgba(15,23,42,.35);
+      opacity:0; transform:translateY(6px);
+      pointer-events:none;
+      transition:opacity .12s ease-out, transform .12s ease-out;
+      font-size:12px; color:#0f172a;
+    }
+    .ner-tooltip.visible{opacity:1; transform:translateY(0);}
+    .ner-tooltip-title{
+      display:flex; justify-content:space-between; gap:8px;
+      font-size:12px; font-weight:600; margin-bottom:4px;
+    }
+    .ner-tooltip-badge{
+      padding:2px 7px;
+      border-radius:999px;
+      background:#eff6ff;
+      border:1px solid #bfdbfe;
+      font-size:10px; font-variant-numeric:tabular-nums;
+      color:#1e3a8a;
+    }
+    .ner-tooltip-def{
+      font-size:11px; color:#64748b; margin-bottom:4px;
+    }
+    .ner-tooltip-topk-title{
+      font-size:10px;
+      letter-spacing:.06em; text-transform:uppercase;
+      color:#94a3b8; margin-bottom:2px;
+    }
+    .ner-tooltip-topk-list{
+      list-style:none; margin:0; padding:0; font-size:11px;
+    }
+    .ner-tooltip-topk-list li{
+      display:flex; justify-content:space-between; gap:6px;
+      padding:1px 0;
+    }
+    .ner-tooltip-topk-label{flex:1; color:#0f172a;}
+    .ner-tooltip-topk-score{
+      font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+      color:#1d4ed8;
+    }
+
+    /* Toast */
+    .af-toast{
+      position:fixed; right:18px; bottom:18px;
+      max-width:260px; padding:8px 10px;
+      border-radius:14px;
+      background:rgba(15,23,42,.94);
+      color:#e5e7eb; font-size:12px;
+      box-shadow:0 18px 45px rgba(15,23,42,.7);
+      display:none; z-index:70;
+    }
+    .af-toast.visible{display:block;}
+    .af-toast-title{
+      font-weight:600; margin-bottom:2px;
+      display:flex; align-items:center; gap:6px;
+    }
+    .af-toast-title span.icon{font-size:14px}
+    .af-toast-body{font-size:11px; color:#cbd5f5}
+
+    /* ===== 控制面板（阈值 + 模式） ===== */
+    .control-bar{
+      display:flex;
+      align-items:flex-end;
+      justify-content:space-between;
+      gap:10px;
+      margin:6px 0 8px;
+      font-size:11px;
+      color:#475569;
+    }
+    .control-group{
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      flex:1;
+    }
+    .control-label{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      font-size:11px;
+      color:#64748b;
+    }
+    .control-label span.badge{
+      padding:2px 7px;
+      border-radius:999px;
+      background:#e0edff;
+      color:#1e293b;
+      font-variant-numeric:tabular-nums;
+    }
+    .control-slider-wrap{
+      display:flex;
+      align-items:center;
+      gap:6px;
+    }
+    .control-slider-wrap input[type="range"]{
+      flex:1;
+      accent-color:var(--primary);
+      cursor:pointer;
+    }
+    .mode-toggle{
+      display:inline-flex;
+      align-items:center;
+      justify-content:flex-end;
+      gap:4px;
+      background:rgba(248,250,252,.8);
+      border-radius:999px;
+      padding:2px 3px;
+      border:1px solid #dbeafe;
+      box-shadow:0 4px 10px rgba(148,163,184,.18);
+    }
+    .mode-pill{
+      border:none;
+      background:transparent;
+      padding:3px 8px;
+      border-radius:999px;
+      font-size:11px;
+      cursor:pointer;
+      color:#64748b;
+      transition:background .12s ease-out,color .12s ease-out,box-shadow .12s ease-out;
+      white-space:nowrap;
+    }
+    .mode-pill[data-active="true"]{
+      background:linear-gradient(120deg,#dbeafe,#bfdbfe);
+      color:#0f172a;
+      box-shadow:0 6px 12px rgba(148,163,184,.35);
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-anim"></div>
+  <div class="glow"></div>
+  <canvas id="dots"></canvas>
+
+  <div class="vertical-flag" aria-label="弱水 HPO NER">弱水表型</div>
+
+  <!-- Tooltip & Toast -->
+  <div id="ner-tooltip" class="ner-tooltip"></div>
+  <div id="af-toast" class="af-toast">
+    <div class="af-toast-title">
+      <span class="icon">!</span><span id="af-toast-title-text">提示</span>
+    </div>
+    <div id="af-toast-body" class="af-toast-body"></div>
+  </div>
+
+  <!-- 顶部导航 -->
+  <nav class="nav" aria-label="主导航">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">水</div>
+      <div>弱水 · <span style="opacity:.8">AquaFlow</span></div>
+    </div>
+    <div>
+      <a href="#panel">标注台</a>
+      <a href="#panel-hpo">HPO 清单</a>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <header class="hero">
+    <span class="tag">
+      <span class="tag-dot"></span>
+      HPO span-contrastive · Demo
+    </span>
+    <h1 class="headline">临床片语，<b>一笔落入 HPO</b></h1>
+    <p>粘贴临床段落，弱水自动抽取表型片段，映射 HPO ID，并展示 Top-1 / Top-5 候选。</p>
+    <div class="hero-sub">前端只负责展示；后端接入 DualLoRAEnc + lexical / fuzzy + 层级剪枝。</div>
+  </header>
+
+  <!-- 主体 -->
+  <div id="panel" class="wrap">
+    <div class="panel">
+      <!-- 左：输入 -->
+      <section class="card" aria-label="输入临床文本">
+        <div class="card-inner">
+          <h3>一、输入文本</h3>
+          <p class="subtitle">可直接粘贴英文或中英混合的病史 / 出院小结片段。</p>
+
+          <div class="field">
+            <label for="input-text">临床笔记 / 病史描述</label>
+            <textarea id="input-text" class="textarea" placeholder="例如：
+The proband has progressive memory loss over 2 years, gait ataxia, frequent generalized tonic-clonic seizures, and mild intellectual disability since childhood. Family history is notable for early-onset dementia in the father."></textarea>
+            <div class="hint">建议保留医学术语与缩写（GTC、EEG、MRI 等），有利于 NER + HPO 映射。</div>
+          </div>
+
+          <div class="actions">
+            <button id="btn-example" class="link-ghost" type="button">填入示例文本</button>
+            <button id="btn-run" class="button" type="button">
+              运行弱水 · HPO NER
+              <span class="hoverEffect"><div></div></span>
+            </button>
+          </div>
+
+          <div style="margin-top:8px;font-size:11px;color:#6b7fab;">
+            后端约定：向 <code style="font-size:11px;background:#e5edff;padding:1px 4px;border-radius:4px;">POST /api/hpo_demo</code>
+            发送 <code style="font-size:11px;background:#e5edff;padding:1px 4px;border-radius:4px;">{"text": "...", "mode": "...", "threshold": 0.3}</code>。
+          </div>
+        </div>
+      </section>
+
+      <!-- 右：高亮文本 + HPO 列表 -->
+      <section class="card" aria-label="标注结果">
+        <div class="card-inner">
+          <h3>二、标注视图</h3>
+          <p class="subtitle">高亮片段为已映射至 HPO 的 NER span，悬停查看 Top-1 / Top-5；右侧卡片内预览 Top-5。</p>
+
+          <div class="meta-bar">
+            <span>原文 + 高亮片段</span>
+            <span id="output-meta">尚未运行。</span>
+          </div>
+
+          <!-- 控制面板（置信度阈值 + 模式选择） -->
+          <div class="control-bar" aria-label="阈值与模式控制">
+            <div class="control-group">
+              <div class="control-label">
+                <span>置信度阈值</span>
+                <span class="badge" id="threshold-label">≥ 0.30</span>
+              </div>
+              <div class="control-slider-wrap">
+                <input id="threshold-slider" type="range" min="0" max="100" value="30" step="1" />
+              </div>
+            </div>
+            <div class="control-group" style="flex:0 0 auto; min-width:190px;">
+              <div class="control-label">
+                <span>模式</span>
+                <span style="opacity:.7;">DualLoRA / Fuzzy / Pipeline</span>
+              </div>
+              <div class="mode-toggle" id="mode-toggle" role="radiogroup" aria-label="推理模式">
+                <button class="mode-pill" type="button" data-mode="duallora" data-active="false">DualLoRAEnc</button>
+                <button class="mode-pill" type="button" data-mode="fuzzy" data-active="false">Fuzzy only</button>
+                <button class="mode-pill" type="button" data-mode="pipeline" data-active="true">Pipeline</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="highlighted-text" class="output-shell" aria-live="polite" aria-atomic="true">
+            <div class="output-placeholder">
+              运行一次之后，这里将以原文为基底、嵌入高亮 span。
+              鼠标悬停任意一段高亮文字，可查看对应的 HPO Top-1 / Top-5（ID / 名称 / 释义 / 评分）。
+            </div>
+          </div>
+
+          <div id="panel-hpo" class="hpo-shell">
+            <div class="hpo-header">
+              <span>三、HPO 术语清单</span>
+              <span id="hpo-count" class="hpo-count">0 项</span>
+            </div>
+            <div class="hpo-scroll" id="hpo-list">
+              <div class="hpo-empty">尚无术语。运行后，这里会列出每个唯一 HPO ID，卡片中展示该 ID 的 Top-1 / Top-5 预览；点击可在上方聚焦对应片段。</div>
+            </div>
+          </div>
+
+          <div class="footer-note">
+            小提示：点击任一 HPO 条目，将高亮文本中对应 ID 的所有片段。
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    // ===== 背景点阵：弱水风格 =====
+    (function(){
+      const c=document.getElementById('dots');
+      if(!c) return;
+      const ctx=c.getContext('2d');
+      let w,h; const N=140; const R=150;
+      let pts=[]; let tick=0;
+      let mouse={x:-9999,y:-9999};
+
+      function resize(){ w=innerWidth; h=innerHeight; c.width=w; c.height=h; }
+      addEventListener('resize',resize); resize();
+      addEventListener('mousemove',e=>{mouse.x=e.clientX; mouse.y=e.clientY;});
+      addEventListener('mouseleave',()=>{mouse.x=-9999; mouse.y=-9999;});
+
+      function spawn(){
+        pts=[];
+        for(let i=0;i<N;i++){
+          pts.push({
+            x:Math.random()*w, y:Math.random()*h,
+            vx:(Math.random()-.5)*.3, vy:(Math.random()-.5)*.3,
+            r:Math.random()*2+0.9, pulse:Math.random()*220+80,
+            born:tick+Math.random()*120
+          });
+        }
+      }
+      spawn();
+
+      function step(){
+        tick++;
+        ctx.clearRect(0,0,w,h);
+
+        for(const p of pts){
+          const dx=mouse.x-p.x, dy=mouse.y-p.y;
+          const dist=Math.hypot(dx,dy);
+          if(dist<220){
+            const f=(220-dist)/220;
+            p.vx+=(dx/dist||0)*0.05*f;
+            p.vy+=(dy/dist||0)*0.05*f;
+          }
+          p.x+=p.vx; p.y+=p.vy;
+          p.vx*=0.985; p.vy*=0.985;
+          if(p.x<-10) p.x=w+10; if(p.x>w+10) p.x=-10;
+          if(p.y<-10) p.y=h+10; if(p.y>h+10) p.y=-10;
+        }
+
+        for(let i=0;i<pts.length;i++){
+          const a=pts[i]; if(tick<a.born) continue;
+          for(let j=i+1;j<pts.length;j++){
+            const b=pts[j]; if(tick<b.born) continue;
+            const dx=a.x-b.x, dy=a.y-b.y; const d=Math.hypot(dx,dy);
+            if(d<R){
+              const alpha=(1-d/R);
+              const mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
+              const dm=Math.hypot(mx-mouse.x,my-mouse.y);
+              const near=Math.max(0,1-dm/240);
+              ctx.strokeStyle=`rgba(117,197,255,${0.6*alpha+0.4*near})`;
+              ctx.lineWidth=0.7+1.3*(alpha+near);
+              ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+            }
+          }
+        }
+
+        for(const p of pts){
+          if(tick<p.born) continue;
+          const phase=(tick%p.pulse)/p.pulse;
+          const pulse=0.4+Math.sin(phase*Math.PI*2)*0.3;
+          const rad=p.r*(1+pulse*0.35);
+          ctx.beginPath(); ctx.arc(p.x,p.y,rad,0,Math.PI*2);
+          ctx.fillStyle=`rgba(117,197,255,${0.22+0.4*pulse})`; ctx.fill();
+          ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(0.8,p.r*0.6),0,Math.PI*2);
+          ctx.fillStyle=`rgba(122,243,255,${0.5+0.35*pulse})`; ctx.fill();
+        }
+        requestAnimationFrame(step);
+      }
+      step();
+    })();
+
+    // ===== NER Demo 逻辑 =====
+    const API_ENDPOINT = "/api/hpo_demo";
+
+    let currentText="";
+    let currentSpans=[];
+    let rawSpans=[];
+    let spanMetaByIndex={};
+    let spansByHpoId={};
+    let tooltipEl=null;
+    let toastTimer=null;
+
+    // 阈值 & 模式（前端状态）
+    let currentThreshold=0.30;   // 0~1
+    let currentMode="pipeline";  // "duallora" | "fuzzy" | "pipeline"
+
+    function escapeHtml(str){
+      return String(str)
+        .replace(/&/g,"&amp;")
+        .replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;")
+        .replace(/"/g,"&quot;")
+        .replace(/'/g,"&#039;");
+    }
+
+    function showToast(msg, title){
+      const toast=document.getElementById("af-toast");
+      const body=document.getElementById("af-toast-body");
+      const titleEl=document.getElementById("af-toast-title-text");
+      if(!toast||!body||!titleEl) return;
+      body.textContent=msg;
+      titleEl.textContent=title || "提示";
+      toast.classList.add("visible");
+      if(toastTimer) clearTimeout(toastTimer);
+      toastTimer=setTimeout(()=>toast.classList.remove("visible"),3800);
+    }
+
+    function positionTooltip(evt){
+      if(!tooltipEl) return;
+      const padding=10;
+      const vw=window.innerWidth, vh=window.innerHeight;
+      let x=evt.clientX+12, y=evt.clientY+12;
+      const rect=tooltipEl.getBoundingClientRect();
+      if(x+rect.width+padding>vw) x=vw-rect.width-padding;
+      if(y+rect.height+padding>vh) y=vh-rect.height-padding;
+      tooltipEl.style.left=x+"px";
+      tooltipEl.style.top=y+"px";
+    }
+
+    function buildTooltipContent(meta){
+      if(!meta) return "";
+      const hpoId=meta.hpo_id || "HPO:????";
+      const name=meta.name || "(无名称)";
+      const def=meta.definition || "后端未返回该术语的定义。";
+      const scoreStr=typeof meta.score==="number"?meta.score.toFixed(3):"–";
+      const top5=Array.isArray(meta.top5)?meta.top5.slice(0,5):[];
+
+      let top5Html="";
+      if(top5.length>0){
+        const items=top5.map((t,i)=>{
+          const lbl=`${i+1}. ${(t.id||"").trim()} · ${(t.name||"").trim()}`;
+          const sc=typeof t.score==="number"?t.score.toFixed(3):"–";
+          return `
+            <li>
+              <div class="ner-tooltip-topk-label">${escapeHtml(lbl)}</div>
+              <div class="ner-tooltip-topk-score">${sc}</div>
+            </li>`;
+        }).join("");
+        top5Html = `
+          <div>
+            <div class="ner-tooltip-topk-title">Top-5 HPO 候选</div>
+            <ul class="ner-tooltip-topk-list">${items}</ul>
+          </div>`;
+      }
+
+      return `
+        <div class="ner-tooltip-title">
+          <div>${escapeHtml(name)}</div>
+          <div class="ner-tooltip-badge">${hpoId} · ${scoreStr}</div>
+        </div>
+        <div class="ner-tooltip-def">${escapeHtml(def)}</div>
+        ${top5Html}
+      `;
+    }
+
+    function renderHighlightedText(rawText, spans){
+      const container=document.getElementById("highlighted-text");
+      if(!container) return;
+      if(!rawText){
+        container.innerHTML=`
+          <div class="output-placeholder">
+            当前文本为空。请在左侧粘贴或输入一段临床文本。
+          </div>`;
+        return;
+      }
+      if(!spans || spans.length===0){
+        container.innerHTML=`
+          <div class="output-placeholder">
+            已连接 HPO NER 后端，但当前阈值下未检测到任何 HPO 映射片段。尝试降低置信度阈值，或加入更具体的体征、症状或病程描述，例如 “progressive ataxia”、“developmental delay”、“intellectual disability” 等。
+          </div>`;
+        return;
+      }
+
+      spans = spans.slice().sort((a,b)=>a.start-b.start || a.end-b.end);
+      spanMetaByIndex={};
+      let parts=[], cursor=0;
+
+      spans.forEach((span,idx)=>{
+        const start=Math.max(0,Math.min(span.start, rawText.length));
+        const end=Math.max(start,Math.min(span.end, rawText.length));
+        if(start>cursor){
+          parts.push(escapeHtml(rawText.slice(cursor,start)));
+        }
+        const seg=escapeHtml(rawText.slice(start,end));
+        const hpoId=span.hpo_id || "HPO:????";
+        spanMetaByIndex[idx]={
+          index:idx,
+          hpo_id:hpoId,
+          text:seg,
+          name:span.name || "",
+          score:span.score,
+          synonyms:span.synonyms || [],
+          definition:span.definition || "",
+          top5:span.top5 || span.candidates || span.topk || []
+        };
+        parts.push(
+          `<span class="ner-span" data-span-idx="${idx}" data-hpo-id="${hpoId}">${seg}</span>`
+        );
+        cursor=end;
+      });
+
+      if(cursor<rawText.length){
+        parts.push(escapeHtml(rawText.slice(cursor)));
+      }
+      container.innerHTML=parts.join("");
+    }
+
+    function renderHpoList(spans){
+      const listEl=document.getElementById("hpo-list");
+      const countEl=document.getElementById("hpo-count");
+      spansByHpoId={};
+      if(!listEl||!countEl) return;
+
+      if(!spans || spans.length===0){
+        listEl.innerHTML='<div class="hpo-empty">尚无术语。运行后，这里会列出每个唯一 HPO ID，卡片中展示该 ID 的 Top-1 / Top-5 预览；点击可在上方聚焦对应片段。</div>';
+        countEl.textContent="0 项";
+        return;
+      }
+
+      spans.forEach((span,idx)=>{
+        const hpoId=span.hpo_id || "HPO:????";
+        if(!spansByHpoId[hpoId]) spansByHpoId[hpoId]=[];
+        spansByHpoId[hpoId].push(idx);
+      });
+
+      const ids=Object.keys(spansByHpoId);
+      countEl.textContent=`${ids.length} 项`;
+
+      const items=ids.map(id=>{
+        const anyIdx=spansByHpoId[id][0];
+        const meta=spanMetaByIndex[anyIdx];
+        const name=meta?.name || "(无名称)";
+        const score=typeof meta?.score==="number"?meta.score.toFixed(3):"–";
+        const syn=(meta?.synonyms && meta.synonyms.length>0)
+          ? meta.synonyms.slice(0,2).join("； ")
+          : "暂无同义词信息。";
+
+        const top5Arr = Array.isArray(meta?.top5) ? meta.top5.slice(0,3) : [];
+        let previewHtml = "";
+        if(top5Arr.length>0){
+          const lis = top5Arr.map((cand,i)=>{
+            const nm = cand.name || cand.id || "";
+            const sc = typeof cand.score==="number" ? cand.score.toFixed(2) : "–";
+            return `
+              <li>
+                <span class="hpo-topk-rank">${i+1}.</span>
+                <span class="hpo-topk-name">${escapeHtml(nm)}</span>
+                <span class="hpo-topk-score">${sc}</span>
+              </li>`;
+          }).join("");
+          previewHtml = `
+            <div class="hpo-topk-preview">
+              <div class="hpo-topk-preview-title">Top-5 preview</div>
+              <ul class="hpo-topk-preview-list">${lis}</ul>
+            </div>`;
+        }
+
+        return {id,name,score,syn,previewHtml};
+      });
+
+      listEl.innerHTML = items.map(t=>`
+        <div class="hpo-item" data-hpo-id="${t.id}">
+          <div class="hpo-id">${t.id}</div>
+          <div class="hpo-name">
+            ${escapeHtml(t.name)}
+            <span class="hpo-score">${t.score}</span>
+          </div>
+          <div class="hpo-syn">${escapeHtml(t.syn)}</div>
+          ${t.previewHtml}
+        </div>
+      `).join("");
+    }
+
+    function attachSpanEvents(){
+      const container=document.getElementById("highlighted-text");
+      if(!container) return;
+      tooltipEl=document.getElementById("ner-tooltip");
+
+      container.addEventListener("mouseover",evt=>{
+        const span=evt.target.closest(".ner-span");
+        if(!span){
+          tooltipEl && tooltipEl.classList.remove("visible");
+          return;
+        }
+        const idx=parseInt(span.getAttribute("data-span-idx") || "-1",10);
+        const meta=spanMetaByIndex[idx];
+        if(!meta || !tooltipEl) return;
+        tooltipEl.innerHTML=buildTooltipContent(meta);
+        tooltipEl.classList.add("visible");
+        positionTooltip(evt);
+      });
+
+      container.addEventListener("mousemove",evt=>{
+        if(!tooltipEl || !tooltipEl.classList.contains("visible")) return;
+        positionTooltip(evt);
+      });
+
+      container.addEventListener("mouseout",evt=>{
+        const span=evt.target.closest(".ner-span");
+        if(!span && tooltipEl) tooltipEl.classList.remove("visible");
+      });
+
+      container.addEventListener("click",evt=>{
+        const span=evt.target.closest(".ner-span");
+        if(!span) return;
+        const hpoId=span.getAttribute("data-hpo-id");
+        if(hpoId) focusByHpoId(hpoId);
+      });
+    }
+
+    function attachHpoListEvents(){
+      const listEl=document.getElementById("hpo-list");
+      if(!listEl) return;
+      listEl.addEventListener("click",evt=>{
+        const item=evt.target.closest(".hpo-item");
+        if(!item) return;
+        const hpoId=item.getAttribute("data-hpo-id");
+        if(hpoId) focusByHpoId(hpoId);
+      });
+    }
+
+    function focusByHpoId(hpoId){
+      const container=document.getElementById("highlighted-text");
+      if(!container) return;
+      const spans=container.querySelectorAll(".ner-span");
+      spans.forEach(sp=>{
+        if(sp.getAttribute("data-hpo-id")===hpoId){
+          sp.setAttribute("data-selected","true");
+        }else{
+          sp.removeAttribute("data-selected");
+        }
+      });
+      const first=container.querySelector(`.ner-span[data-hpo-id="${CSS.escape(hpoId)}"]`);
+      if(first){
+        first.scrollIntoView({behavior:"smooth", block:"center"});
+      }
+    }
+
+    // 根据 currentThreshold 过滤 rawSpans，并重新渲染
+    function applyThresholdAndRender(){
+      const metaEl=document.getElementById("output-meta");
+      const modeLabel =
+        currentMode==="duallora" ? "DualLoRAEnc" :
+        currentMode==="fuzzy" ? "Fuzzy only" :
+        "Pipeline";
+
+      const sliderLabel=document.getElementById("threshold-label");
+      if(sliderLabel){
+        sliderLabel.textContent=`≥ ${currentThreshold.toFixed(2)}`;
+      }
+
+      if(!rawSpans || rawSpans.length===0){
+        currentSpans=[];
+        renderHighlightedText(currentText, currentSpans);
+        renderHpoList(currentSpans);
+        if(metaEl){
+          metaEl.textContent=`当前模式：${modeLabel} · 在阈值 ≥ ${currentThreshold.toFixed(2)} 下无 span`;
+        }
+        return;
+      }
+
+      currentSpans = rawSpans.filter(s=>{
+        if(typeof s.score!=="number") return true;
+        return s.score>=currentThreshold;
+      });
+
+      renderHighlightedText(currentText,currentSpans);
+      renderHpoList(currentSpans);
+
+      if(metaEl){
+        metaEl.textContent=
+          `span 总数：${rawSpans.length} · 通过阈值（≥ ${currentThreshold.toFixed(2)}）：${currentSpans.length} · 模式：${modeLabel}`;
+      }
+    }
+
+    async function runDemo(){
+      const textEl=document.getElementById("input-text");
+      const metaEl=document.getElementById("output-meta");
+      if(!textEl || !metaEl) return;
+      const text=textEl.value.trim();
+      if(!text){
+        showToast("请先输入或粘贴一段临床文本。","提示");
+        return;
+      }
+
+      // 同步阈值
+      const slider=document.getElementById("threshold-slider");
+      if(slider){
+        const v = Number(slider.value||"30");
+        currentThreshold = Math.min(1, Math.max(0, v/100));
+      }
+
+      const btn=document.getElementById("btn-run");
+      if(btn){
+        btn.disabled=true;
+        btn.textContent="推理中…";
+      }
+      metaEl.textContent="后端推理中…";
+
+      const start=performance.now();
+      try{
+        const resp=await fetch(API_ENDPOINT,{
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            text,
+            mode: currentMode,
+            threshold: currentThreshold
+          })
+        });
+        if(!resp.ok){
+          throw new Error("HTTP "+resp.status+" · "+resp.statusText);
+        }
+        const data=await resp.json();
+        if(!data || typeof data!=="object"){
+          throw new Error("返回 JSON 结构异常");
+        }
+
+        if(data.error){
+          metaEl.textContent="后端错误："+data.error;
+          rawSpans=[];
+          currentText=text;
+          applyThresholdAndRender();
+          showToast("后端错误："+data.error,"后端错误");
+          return;
+        }
+
+        currentText=typeof data.text==="string"?data.text:text;
+        rawSpans=Array.isArray(data.spans)?data.spans:[];
+        const elapse=(performance.now()-start)/1000;
+
+        // 先按阈值过滤 + 渲染
+        applyThresholdAndRender();
+
+        const modeLabel =
+          currentMode==="duallora" ? "DualLoRAEnc" :
+          currentMode==="fuzzy" ? "Fuzzy only" :
+          "Pipeline";
+
+        if(metaEl){
+          metaEl.textContent += ` · 延迟：${elapse.toFixed(2)} s`;
+          metaEl.title = `后端总 span：${rawSpans.length}，阈值后：${currentSpans.length} · 模式：${modeLabel}`;
+        }
+      }catch(err){
+        console.error(err);
+        const metaEl2=document.getElementById("output-meta");
+        if(metaEl2) metaEl2.textContent="请求失败：无法连接 HPO NER 后端。";
+        showToast("无法连接 HPO NER 后端，请确认服务是否在 8008 端口运行且 /api/hpo_demo 可访问。\n详情："+(err && err.message ? err.message : String(err)),"连接失败");
+      }finally{
+        if(btn){
+          btn.disabled=false;
+          btn.textContent="运行弱水 · HPO NER";
+        }
+      }
+    }
+
+    function fillExample(){
+      const textEl=document.getElementById("input-text");
+      if(!textEl) return;
+      textEl.value = [
+        "The proband is a 10-year-old boy with progressive memory loss over 2 years, gait ataxia, and frequent generalized tonic-clonic seizures.",
+        "Mild intellectual disability was noted in early childhood with global developmental delay.",
+        "EEG shows generalized spike-and-wave discharges, and brain MRI reveals mild cerebellar atrophy.",
+        "Family history is notable for early-onset dementia in the father."
+      ].join(" ");
+      textEl.focus();
+    }
+
+    function attachControlEvents(){
+      // 阈值滑条
+      const slider=document.getElementById("threshold-slider");
+      const label=document.getElementById("threshold-label");
+      if(slider){
+        slider.addEventListener("input",()=>{
+          const v = Number(slider.value||"30");
+          currentThreshold = Math.min(1, Math.max(0, v/100));
+          if(label){
+            label.textContent=`≥ ${currentThreshold.toFixed(2)}`;
+          }
+          applyThresholdAndRender();
+        });
+      }
+
+      // 模式切换
+      const toggle=document.getElementById("mode-toggle");
+      if(toggle){
+        toggle.addEventListener("click",(evt)=>{
+          const btn=evt.target.closest(".mode-pill");
+          if(!btn) return;
+          const mode=btn.getAttribute("data-mode");
+          if(!mode) return;
+          currentMode=mode;
+
+          const pills=toggle.querySelectorAll(".mode-pill");
+          pills.forEach(p=>{
+            if(p===btn){
+              p.setAttribute("data-active","true");
+            }else{
+              p.setAttribute("data-active","false");
+            }
+          });
+
+          const metaEl=document.getElementById("output-meta");
+          const modeLabel =
+            currentMode==="duallora" ? "DualLoRAEnc" :
+            currentMode==="fuzzy" ? "Fuzzy only" :
+            "Pipeline";
+          if(metaEl && rawSpans.length>0){
+            metaEl.textContent =
+              `span 总数：${rawSpans.length} · 通过阈值（≥ ${currentThreshold.toFixed(2)}）：${currentSpans.length} · 模式：${modeLabel}`;
+          }
+        });
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", ()=>{
+      document.getElementById("btn-run")?.addEventListener("click", runDemo);
+      document.getElementById("btn-example")?.addEventListener("click", fillExample);
+      attachSpanEvents();
+      attachHpoListEvents();
+      attachControlEvents();
+    });
+  </script>
+</body>
+</html>
